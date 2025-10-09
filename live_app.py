@@ -1,30 +1,34 @@
 # ======================================================
-# ✈️ X-PLANE PREDICTIVE MAINTENANCE STREAMLIT APP
+# ✈️ X-PLANE PREDICTIVE MAINTENANCE STREAMLIT APP (Unified + Enhanced)
 # ======================================================
 import os
 import time
 from datetime import datetime
+import io
 import joblib
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import streamlit as st
-import plotly.graph_objects as go
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (
-    accuracy_score, confusion_matrix, roc_curve, auc,
-    precision_score, recall_score, f1_score
-)
+from sklearn.metrics import confusion_matrix, roc_curve, auc
 from tensorflow.keras.models import load_model
+from zoneinfo import ZoneInfo
+
+
 # ---------- CONFIG / PATHS ----------
 XGB_MODEL_PATH = r"C:\Users\T8630\Desktop\xplane_predictive_project\models\xplane_xgboost.pkl"
 LSTM_MODEL_PATH = r"C:\Users\T8630\Desktop\xplane_predictive_project\models\xplane_lstm.h5"
 SCALER_PATH = r"C:\Users\T8630\Desktop\xplane_predictive_project\models\lstm_scaler.pkl"
 DATA_PATH = r"C:\Users\T8630\Desktop\xplane_predictive_project\data\processed\xplane_features.csv"
 DEFAULT_LSTM_TIMESTEPS = 50
-# ======================================================
-# CACHED HELPERS
-# ======================================================
+LOG_OUT_PATH = r"C:\Users\T8630\Desktop\xplane_predictive_project\data\live_log.csv"
+
+# ---------- APP CONFIG ----------
+st.set_page_config(page_title="✈️ X-Plane Predictive Maintenance", layout="wide")
+
+# ---------- CACHED HELPERS ----------
 @st.cache_resource
 def load_xgb_model(path=XGB_MODEL_PATH):
     if not os.path.exists(path):
@@ -34,64 +38,47 @@ def load_xgb_model(path=XGB_MODEL_PATH):
         model = data.get("model", data.get("model_object", None)) or data
         threshold = data.get("threshold", 0.5)
     elif isinstance(data, (tuple, list)):
-        try:
-            model, threshold = data[0], data[1]
-        except Exception:
-            model, threshold = data, 0.5
+        model, threshold = data[0], data[1] if len(data) > 1 else 0.5
     else:
         model, threshold = data, 0.5
     return model, float(threshold)
+
 @st.cache_resource
 def load_lstm_model(path=LSTM_MODEL_PATH):
     if not os.path.exists(path):
         return None
     return load_model(path)
+
 @st.cache_resource
 def load_scaler(path=SCALER_PATH):
     if os.path.exists(path):
         return joblib.load(path)
     return None
-# ======================================================
-# STREAM SIMULATION
-# ======================================================
-def live_stream(file_path = DATA_PATH):
-    df_iter = pd.read_csv(file_path,chunksize = 1)
-    for row in df_iter:
+
+# ---------- UTILITIES ----------
+def live_stream(file_path=DATA_PATH):
+    if not os.path.exists(file_path):
+        return
+    for row in pd.read_csv(file_path, chunksize=1):
         yield row
 
-# ======================================================
-# HELPER FUNCTIONS
-# ======================================================
-def clean_tabular_for_xgb(df, model=None):
-    df = df.copy()
+def clean_features_for_model(row_df, drop_cols=("failure",)):
+    df = row_df.copy()
     df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
-    for c in df.select_dtypes(include=["object"]).columns:
-        try:
+    for c in drop_cols:
+        if c in df.columns:
+            df = df.drop(columns=[c])
+    for c in df.columns:
+        if df[c].dtype == object:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-        except Exception:
-            pass
-    df = df.select_dtypes(include=[np.number])
-    if model is not None:
-        expected = None
-        try:
-            expected = list(model.feature_names_in_)
-        except Exception:
-            expected = None
-        if expected:
-            for col in expected:
-                if col not in df.columns:
-                    df[col] = 0.0
-            df = df[expected]
-    return df
+    return df.select_dtypes(include=[np.number])
+
 def sliding_windows(X, timesteps=50):
-    Xs = []
-    for i in range(len(X) - timesteps):
-        Xs.append(X[i:i+timesteps])
-    if len(Xs) == 0:
-        return np.empty((0, timesteps, X.shape[1]))
-    return np.stack(Xs, axis=0)
+    Xs = [X[i:i+timesteps] for i in range(len(X)-timesteps)]
+    return np.stack(Xs, axis=0) if Xs else np.empty((0, timesteps, X.shape[1]))
+
 def plot_confusion(cm, labels=["0", "1"], title="Confusion Matrix"):
-    fig, ax = plt.subplots(figsize=(4, 4))
+    fig, ax = plt.subplots(figsize=(4,4))
     im = ax.imshow(cm, cmap=plt.cm.Blues)
     ax.set_xticks(np.arange(len(labels)))
     ax.set_yticks(np.arange(len(labels)))
@@ -101,32 +88,48 @@ def plot_confusion(cm, labels=["0", "1"], title="Confusion Matrix"):
     ax.set_xlabel("Predicted")
     for i in range(len(labels)):
         for j in range(len(labels)):
-            ax.text(j, i, cm[i, j], ha="center", va="center", color="black")
+            ax.text(j, i, cm[i,j], ha="center", va="center", color="black")
     plt.title(title)
     plt.tight_layout()
     return fig
+
 def plot_roc(y_true, y_proba, label="Model"):
     fpr, tpr, _ = roc_curve(y_true, y_proba)
     roc_auc = auc(fpr, tpr)
-    fig, ax = plt.subplots(figsize=(5, 4))
+    fig, ax = plt.subplots(figsize=(5,4))
     ax.plot(fpr, tpr, lw=2, label=f"{label} (AUC={roc_auc:.2f})")
-    ax.plot([0, 1], [0, 1], color="grey", linestyle="--")
+    ax.plot([0,1],[0,1], color="grey", linestyle="--")
     ax.set_xlabel("False Positive Rate")
     ax.set_ylabel("True Positive Rate")
     ax.legend(loc="lower right")
     ax.grid(True)
     plt.tight_layout()
     return fig, roc_auc
-# ======================================================
-# STREAMLIT APP CONFIG
-# ======================================================
-st.set_page_config(page_title="✈️ X-Plane Predictive Maintenance", layout="wide")
-st.sidebar.header("Mode Selection")
-mode = st.sidebar.radio("Choose mode", ["📡 Real-Time Streaming", "📊 Interactive Batch Analysis"])
+
+def identify_top_contributors(xgb_model, scaler, features_df, top_k=3):
+    if xgb_model is None or scaler is None:
+        return None
+    try:
+        feat_names = list(xgb_model.feature_names_in_)
+    except Exception:
+        feat_names = None
+    if feat_names is None:
+        return None
+    importances = getattr(xgb_model, "feature_importances_", np.ones(len(feat_names)))
+    mean, scale = getattr(scaler, "mean_", None), getattr(scaler, "scale_", None)
+    if mean is None or scale is None:
+        return None
+    row_vals = np.array([float(features_df.get(col, 0)) for col in feat_names])
+    z = (row_vals - mean) / np.where(scale==0, 1e-6, scale)
+    scores = np.abs(z) * np.abs(importances)
+    top_idx = np.argsort(scores)[::-1][:top_k]
+    return [{"feature": feat_names[i], "value": row_vals[i], "score": scores[i]} for i in top_idx]
+
+# ---------- UI ----------
 with st.sidebar.expander("📘 About This Dashboard"):
     st.markdown("""
     ### ✈️ X-Plane Predictive Maintenance Dashboard
-    This dashboard simulates **real-time engine health monitoring** for aircraft systems using live data from X-Plane.
+    This dashboard simulates **real-time engine health monitoring** for aircraft systems using live data from X-Plane 11.
 
     #### 🧩 Parameters:
     - **RPM**: Engine revolutions per minute — reflects power output.
@@ -147,170 +150,244 @@ with st.sidebar.expander("📘 About This Dashboard"):
     **Goal:** Predict failures before they happen — transforming maintenance from Reactive to Predictive.
     """)
 
-# Load models
+st.sidebar.header("Mode Selection")
+mode = st.sidebar.radio("Choose mode", ["📡 Real-Time Streaming", "📊 Interactive Batch Analysis"])
+
 xgb_model, saved_threshold = load_xgb_model()
 lstm_model = load_lstm_model()
 scaler = load_scaler()
-# ======================================================
-# 📡 REAL-TIME STREAMING MODE
-# ======================================================
+
+# ---------- REAL-TIME STREAMING ----------
 if mode == "📡 Real-Time Streaming":
     st.title("📡 Real-Time Predictive Maintenance Dashboard")
-    # Sidebar controls
+
     st.sidebar.subheader("🔧 Stream Controls")
-    refresh_rate = st.sidebar.slider("Refresh Interval (seconds)", 1, 10, 2)
+    refresh_rate = st.sidebar.slider("Refresh Interval (seconds)", 0.5, 10.0, 1.0, 0.5)
     start_stream = st.sidebar.button("▶ Start Live Streaming")
-    # Threshold zones
+    stop_stream = st.sidebar.button("■ Stop Live Streaming")
+
     st.sidebar.subheader("🎯 Risk Zone Thresholds")
-    green_threshold = st.sidebar.slider("🟢 Green Zone (Safe up to)", 0.0, 1.0, 0.5, 0.01)
-    yellow_threshold = st.sidebar.slider("🟡 Yellow Zone (Caution up to)", green_threshold, 1.0, 0.7, 0.01)
-    red_threshold = 1.0
-    # Placeholders
-    gauge_placeholder = st.empty()
-    gauge_col, status_col = st.columns([2, 1])
-    status_placeholder = st.empty()
-    status = st.empty()
-    chart_xgb = st.line_chart()
-    chart_lstm = st.line_chart()
-    # Gauge function
-    def update_gauge(prob,last_prob=[0]):
-        prob = max(0,min(prob,1.0))
-        smooth_prob = last_prob[0] + (prob - last_prob[0])*1
-        last_prob[0] = smooth_prob
-        if smooth_prob < green_threshold:
-            color = 'green'
-            status_text = "🟢 STABLE: "
-            description = "Engine is operating normally! 😊"
-        elif smooth_prob < yellow_threshold:
-            color = 'yellow'
-            status_text = "⚠️ LOW RISK: "
-            description = "Model detected minor anomalies! "
+    green_threshold = st.sidebar.slider("🟢 Green Zone", 0.0, 1.0, 0.5, 0.01)
+    yellow_threshold = st.sidebar.slider("🟡 Yellow Zone", green_threshold, 1.0, 0.75, 0.01)
+
+    # Logging Controls
+    st.sidebar.subheader("📥 Logging")
+    if "live_log_df" not in st.session_state:
+        st.session_state.live_log_df = pd.DataFrame(columns=["timestamp","xgb_prob","lstm_prob","combined_prob","zone"])
+    log_button = st.sidebar.button("Toggle Logging")
+    if log_button:
+        st.session_state["log_enabled"] = not st.session_state.get("log_enabled", False)
+        st.success("Logging Enabled" if st.session_state["log_enabled"] else "Logging Disabled")
+
+    # Layout
+    col_left, col_right = st.columns([2,1])
+    with col_left:
+        gauge_ph = st.empty()
+        chart_xgb = st.line_chart(pd.DataFrame(columns=["xgb_prob"]))
+        chart_lstm = st.line_chart(pd.DataFrame(columns=["lstm_prob"]))
+    with col_right:
+        status_area = st.empty()
+        faulty_area = st.empty()
+
+    if "stream_running" not in st.session_state:
+        st.session_state.stream_running = False
+
+    def render_gauge(prob, g_thresh, y_thresh):
+        """Animated cinematic gauge with glowing background that reacts to failure probability."""
+        prob = float(np.clip(prob, 0.0, 1.0))
+
+        # Determine zone colors + glow intensity
+        if prob <= g_thresh:
+            bar_color = "#15FF00"       # bright green
+            bg_color = "rgba(0, 200, 0, 0.5)"  # subtle green
+            pulse_strength = 0.1
+        elif prob <= y_thresh:
+            bar_color = "#FFD700"       # amber
+            bg_color = "rgba(255, 215, 0, 0.25)"
+            pulse_strength = 0.3
         else:
-            color = 'red'
-            status_text = "🔴 HIGH RISK: "
-            description = "Potential failure detected! Consider replacing the part before failure! "
+            bar_color = "#FF4C4C"       # bright red
+            bg_color = "rgba(255, 0, 0, 0.3)"
+            pulse_strength = 0.6
+
+        pulse_phase = (time.time() * 2.5) % (2 * np.pi) 
+        pulse_alpha = 0.25 + pulse_strength * (0.5 + 0.5 * np.sin(pulse_phase)) 
+        glow_rgba = f"rgba(255, 0, 0, {pulse_alpha:.2f})" if prob > y_thresh else bg_color
+
+        # Build the gauge
         fig = go.Figure(go.Indicator(
-            mode = 'gauge+number',
-            value = smooth_prob,
-            delta = {'reference':last_prob[0],'increasing':{'color':'red'},'decreasing':{'color':'green'}},
-            domain = {'x':[0,1],'y':[0,1]},
-            title = {'text':'Failure Probability','font':{'size':22}},
-            gauge = {
-                'axis':{'range':[0,1]},
-                'bar':{'color':color},
-                'steps':[
-                    {'range':[0,green_threshold],'color':'lightgreen'},
-                    {'range':[green_threshold,yellow_threshold],'color':'orange'},
-                    {'range':[yellow_threshold,red_threshold],'color':'salmon'}
+            mode="gauge+number",
+            value=prob,
+            number={'font': {'color': 'white', 'size': 44}},
+            domain={'x': [0, 1], 'y': [0, 1]},
+            title={'text': "Failure Probability", 'font': {'size': 22, 'color': 'white'}},
+            gauge={
+                'axis': {'range': [0, 1], 'tickcolor': 'white', 'tickfont': {'color': 'white'}},
+                'bar': {'color': bar_color, 'thickness': 0.35},
+                'borderwidth': 3,
+                'bordercolor': "#000000",
+                'steps': [
+                    {'range': [0, g_thresh], 'color': '#003300'},
+                    {'range': [g_thresh, y_thresh], 'color': '#705900'},
+                    {'range': [y_thresh, 1.0], 'color': '#4D0000'}
                 ],
-                'threshold':{
-                    'line':{'color':'black','width':3},
-                    'thickness':0.8,
-                    'value':smooth_prob
+                'threshold': {
+                    'line': {'color': "#000000", 'width': 5},
+                    'thickness': 0.8,
+                    'value': prob
                 }
             }
         ))
+
+        # Set layout with dynamic glow background
         fig.update_layout(
-            height=250,
-            margin=dict(t=10, b=10, l=10, r=10),
-            transition = {'duration':10,'easing':'cubic-in-out'})
-        gauge_placeholder.plotly_chart(
-            fig, use_container_width=True,key = f"gauge_{int(time.time()*1000)}")
-        status_placeholder.markdown(
-             f"<h3 style='color:{color}'>{status_text}{description}</h3>",
-        unsafe_allow_html=True
+            height=360,
+            margin=dict(t=60, b=40, l=40, r=40),
+            paper_bgcolor=glow_rgba,     # 💡 soft pulsating background behind the meter
+            plot_bgcolor="#0E1117",      # consistent dashboard tone
+            font={'color': 'white'},
+            transition={'duration': 500, 'easing': 'cubic-in-out'}
         )
-    # Live streaming loop
-    def run_dashboard():
-        seq_buffer = []
+
+        gauge_ph.plotly_chart(fig, use_container_width=True, key=f"gauge_{time.time_ns()}")
+
+    def zone_label(prob, g_thresh, y_thresh):
+        if prob <= g_thresh:
+            return "🟢 STABLE","green","Engine is operating normally! 😊"
+        elif prob <= y_thresh:
+            return "🟡 LOW RISK","gold","Model has detected minor anomalies! "
+        else:
+            return "🔴 HIGH RISK","red","Potential failure detected! Consider replacing the part before failure! "
+
+    if start_stream:
+        st.session_state.stream_running = True
+    if stop_stream:
+        st.session_state.stream_running = False
+
+    if st.session_state.stream_running:
+        last_prob = 0.0
         for row in live_stream():
-            features = row.drop(columns=["failure", "Unnamed: 34"], errors="ignore")
-            # Engine readings
-            engine_rpm = row['rpm_1engin'].values[0] if 'rpm_1engin' in row else 0
-            n1 = row['N1__1_pcnt'].values[0] if 'N1__1_pcnt' in row else 0
-            n2 = row['N1__2_pcnt'].values[0] if 'N1__2_pcnt' in row else 0
-            egt1 = row['EGT_1__deg'].values[0] if 'EGT_1__deg' in row else 0
-            egt2 = row['EGT_2__deg'].values[0] if 'EGT_2__deg' in row else 0
-            oil_temp1 = row['OILT1__deg'].values[0] if 'OILT1__deg' in row else 0
-            oil_temp2 = row['OILT2__deg'].values[0] if 'OILT2__deg' in row else 0
-            fuel_pressure = row['FUEP1__psi'].values[0] if 'FUEP1__psi' in row else 0
-            # XGBoost inference
+            if not st.session_state.stream_running:
+                break
+            features = clean_features_for_model(row)
             try:
-                xgb_prob = xgb_model.predict_proba(features)[0][1]
-            except:
-                xgb_prob = 0.0
-            # LSTM inference
+                xgb_prob = float(xgb_model.predict_proba(features)[0][1])
+            except Exception: xgb_prob = 0.0
             try:
                 scaled = scaler.transform(features)
-                seq_buffer.append(scaled.flatten())
-                if len(seq_buffer) >= 50:
-                    X_seq = np.array(seq_buffer[-50:]).reshape(1, 50, features.shape[1])
-                    lstm_prob = float(lstm_model.predict(X_seq, verbose=0)[0][0])
-                else:
-                    lstm_prob = 0.0
-            except:
-                lstm_prob = 0.0
-            # Combined probability
-            combined_prob = max(xgb_prob, lstm_prob)
-            update_gauge(combined_prob)
-            status.write(f"""
-            **Engine RPM**: {engine_rpm:.2f}  
-            **N1**: {n1:.2f}%  
-            **N2**: {n2:.2f}%   
-            **Oil Temp (Engine 1)**: {oil_temp1:.2f} °C  
-            **Oil Temp (Engine 2)**: {oil_temp2:.2f} °C  
-            **EGT (Engine 1)**: {egt1:.2f} °C   
-            **EGT (Engine 2)**: {egt2:.2f} °C   
-            **Fuel Pressure**: {fuel_pressure:.2f} psi  
-            **Failure Probability (XGBoost) TOP GRAPH**: {xgb_prob:.2f}  
-            **Failure Probability (LSTM) BOTTOM GRAPH**: {lstm_prob:.2f}  
-            """)
-            chart_xgb.add_rows({"XGBoost Failure Probability": [xgb_prob]})
-            chart_lstm.add_rows({"LSTM Failure Probability": [lstm_prob]})
+                if "seq_buf" not in st.session_state:
+                    st.session_state.seq_buf = []
+                st.session_state.seq_buf.append(scaled.flatten())
+                lstm_prob = float(lstm_model.predict(
+                    np.array(st.session_state.seq_buf[-DEFAULT_LSTM_TIMESTEPS:]).reshape(1,DEFAULT_LSTM_TIMESTEPS,features.shape[1]),
+                    verbose=0)[0][0]) if len(st.session_state.seq_buf)>=DEFAULT_LSTM_TIMESTEPS else 0.0
+            except Exception: lstm_prob = 0.0
+
+            combined = (xgb_prob + lstm_prob)
+            smooth = last_prob + (combined - last_prob)
+            last_prob = smooth
+
+            render_gauge(smooth, green_threshold, yellow_threshold)
+            chart_xgb.add_rows(pd.DataFrame({"xgb_prob":[xgb_prob]}))
+            chart_lstm.add_rows(pd.DataFrame({"lstm_prob":[lstm_prob]}))
+
+            zone_txt, color, desc = zone_label(smooth, green_threshold, yellow_threshold)
+            try:
+                engine_rpm = float(row['rpm_1engin'].values[0]) if 'rpm_1engin' in row.columns else 0.0
+                n1 = float(row['N1__1_pcnt'].values[0]) if 'N1__1_pcnt' in row.columns else 0.0
+                n2 = float(row['N1__2_pcnt'].values[0]) if 'N1__2_pcnt' in row.columns else 0.0
+                oil_temp1 = float(row['OILT1__deg'].values[0]) if 'OILT1__deg' in row.columns else 0.0
+                oil_temp2 = float(row['OILT2__deg'].values[0]) if 'OILT2__deg' in row.columns else 0.0
+                egt1 = float(row['EGT_1__deg'].values[0]) if 'EGT_1__deg' in row.columns else 0.0
+                egt2 = float(row['EGT_2__deg'].values[0]) if 'EGT_2__deg' in row.columns else 0.0
+                fuel_pressure = float(row['FUEP1__psi'].values[0]) if 'FUEP1__psi' in row.columns else 0.0
+            except Exception:
+                engine_rpm = n1 = n2 = oil_temp1 = oil_temp2 = egt1 = egt2 = fuel_pressure = 0.0
+            status_area.markdown(f"""
+                <div style="padding:12px;border-radius:12px;background:rgba(255,255,255,0.05);
+                    border-left:6px solid {color};box-shadow:0 0 25px {color}80;">
+                <h3 style="margin:0;color:{color};font-size:22px">{zone_txt}</h3>
+                <p style="margin:4px 0;font-size:16px;color:white">{desc}</p>
+                <p style="margin:4px 0;color:lightgray">
+                Combined Probability: <b style="color:{color}">{smooth:.3f}</b></p>
+
+                <hr style="border:1px solid rgba(255,255,255,0.1)">
+                <h4 style="color:white;margin-bottom:4px;">Telemetry Data</h4>
+                <ul style="list-style:none;padding-left:8px;color:#dcdcdc;font-size:15px;line-height:1.5;">
+                    <li><b>Engine RPM:</b> {engine_rpm:.2f}</li>
+                    <li><b>N1:</b> {n1:.2f}% | <b>N2:</b> {n2:.2f}%</li>
+                    <li><b>Oil Temp (Eng 1):</b> {oil_temp1:.2f} °C | <b>Oil Temp (Eng 2):</b> {oil_temp2:.2f} °C</li>
+                    <li><b>EGT (Eng 1):</b> {egt1:.2f} °C | <b>EGT (Eng 2):</b> {egt2:.2f} °C</li>
+                    <li><b>Fuel Pressure:</b> {fuel_pressure:.2f} psi</li>
+                    <li><b>Failure Probability (XGBoost – Top Graph):</b> {xgb_prob:.2f}</li>
+                    <li><b>Failure Probability (LSTM – Bottom Graph):</b> {lstm_prob:.2f}</li>
+                </ul>
+                </div>
+            """, unsafe_allow_html=True)
+
+            if st.session_state.get("log_enabled", False):
+                st.session_state.live_log_df = pd.concat([st.session_state.live_log_df, pd.DataFrame([{
+                    "timestamp": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(),
+                    "xgb_prob": xgb_prob,
+                    "lstm_prob": lstm_prob,
+                    "combined_prob": smooth,
+                    "zone": zone_txt
+                }])], ignore_index=True)
+                st.session_state.live_log_df.tail(1).to_csv(LOG_OUT_PATH, mode="a", header=not os.path.exists(LOG_OUT_PATH), index=False)
             time.sleep(refresh_rate)
-    if start_stream:
-        run_dashboard()
-# ======================================================
-# 📊 INTERACTIVE BATCH ANALYSIS MODE
-# ======================================================
+        st.info("Stream stopped.")
+    
+# ---------- BATCH ANALYSIS ----------
 if mode == "📊 Interactive Batch Analysis":
     st.title("📊 Interactive Batch Analysis")
-    uploaded = st.file_uploader("Upload X-Plane Processed CSV", type=["csv"])
-    model_choice = st.selectbox("Select Model", ["XGBoost", "LSTM", "Both"], index=0)
+    uploaded = st.file_uploader("Upload processed X-Plane CSV", type=["csv"])
+    model_choice = st.selectbox("Select Model", ["XGBoost", "LSTM", "Both"])
     if uploaded:
         df = pd.read_csv(uploaded)
-        st.write(f"✅ Loaded file with {df.shape[0]} rows and {df.shape[1]} columns")
+        st.write(f"Loaded: {df.shape[0]} rows × {df.shape[1]} cols")
         st.dataframe(df.head())
-        if model_choice in ["XGBoost", "Both"]:
+        if model_choice in ("XGBoost","Both"):
             st.subheader("XGBoost Analysis")
-            X = df.drop(columns=["failure", "Unnamed: 34"], errors="ignore")
+            X = clean_features_for_model(df)
             y = df["failure"] if "failure" in df.columns else None
-            try:
-                proba = xgb_model.predict_proba(X)[:, 1]
-                preds = (proba >= 0.5).astype(int)
-                if y is not None:
-                    cm = confusion_matrix(y, preds)
-                    st.pyplot(plot_confusion(cm, ["No Failure", "Failure"], "XGBoost Confusion Matrix"))
-                    fig_roc, auc_val = plot_roc(y, proba, "XGBoost")
-                    st.pyplot(fig_roc)
-                    st.success(f"ROC-AUC: {auc_val:.3f}")
-            except Exception as e:
-                st.error(f"XGBoost inference failed: {e}")
-        if model_choice in ["LSTM", "Both"]:
+            proba = xgb_model.predict_proba(X)[:,1]
+            preds = (proba>=0.5).astype(int)
+            if y is not None:
+                cm = confusion_matrix(y, preds)
+                st.pyplot(plot_confusion(cm,["NoFail","Fail"],"XGB Confusion"))
+                fig_roc, aucv = plot_roc(y, proba, "XGBoost")
+                st.pyplot(fig_roc)
+                st.success(f"ROC-AUC: {aucv:.3f}")
+        if model_choice in ("LSTM","Both"):
             st.subheader("LSTM Analysis")
-            df_num = df.select_dtypes(include=[np.number]).drop(columns=["failure"], errors="ignore")
+            df_num = df.select_dtypes(include=[np.number])
             y = df["failure"] if "failure" in df.columns else None
-            try:
-                X_scaled = scaler.transform(df_num)
-                X_seq = sliding_windows(X_scaled, timesteps=DEFAULT_LSTM_TIMESTEPS)
-                proba = lstm_model.predict(X_seq).ravel()
-                preds = (proba >= 0.5).astype(int)
-                if y is not None:
-                    y_true = y[DEFAULT_LSTM_TIMESTEPS: DEFAULT_LSTM_TIMESTEPS + len(preds)]
-                    cm = confusion_matrix(y_true, preds)
-                    st.pyplot(plot_confusion(cm, ["No Failure", "Failure"], "LSTM Confusion Matrix"))
-                    fig_roc, auc_val = plot_roc(y_true, proba, "LSTM")
-                    st.pyplot(fig_roc)
-                    st.success(f"ROC-AUC: {auc_val:.3f}")
-            except Exception as e:
-                st.error(f"LSTM inference failed: {e}")
+            expected_features = getattr(scaler, "feature_names_in_", None)
+            if expected_features is not None:
+                # Add missing columns
+                for col in expected_features:
+                    if col not in df_num.columns:
+                        df_num[col] = 0.0
+                # Drop extra columns not seen during training
+                df_num = df_num[expected_features]
+            else:
+                # fallback: ensure consistent number of columns
+                df_num = df_num.iloc[:, :scaler.mean_.shape[0]]
+            X_scaled = scaler.transform(df_num)
+            X_seq = sliding_windows(X_scaled, DEFAULT_LSTM_TIMESTEPS)
+            proba = lstm_model.predict(X_seq).ravel()
+            preds = (proba>=0.5).astype(int)
+            if y is not None:
+                y_true = y[DEFAULT_LSTM_TIMESTEPS:DEFAULT_LSTM_TIMESTEPS+len(preds)]
+                cm = confusion_matrix(y_true, preds)
+                st.pyplot(plot_confusion(cm,["NoFail","Fail"],"LSTM Confusion"))
+                fig_roc, aucv = plot_roc(y_true, proba, "LSTM")
+                st.pyplot(fig_roc)
+                st.success(f"ROC-AUC: {aucv:.3f}")
+
+# ---------- FOOTER ----------
+st.markdown("---")
+if "live_log_df" in st.session_state and not st.session_state.live_log_df.empty:
+    csv_bytes = st.session_state.live_log_df.to_csv(index=False).encode("utf-8")
+    st.download_button("📥 Download Log (CSV)", csv_bytes, "live_log.csv", "text/csv")
+st.caption("🛫 Unified Predictive Maintenance Dashboard | XGBoost + LSTM | Real-time + Batch Analysis + Logging + Fault Insights")
