@@ -1,1 +1,68 @@
-fact_sec	fsim_sec	frame_time	__cpu_time	_gpu_time_	_grndratio	_flitratio	_Vind_kias	_Vind_keas	Vtrue_ktas	Vtrue_ktgs	_Vind__mph	Vtruemphas	Vtruemphgs	power_1hp	power_2hp	thrst_1lb	thrst_2lb	rpm_1engin	rpm_2engin	N1__1_pcnt	N1__2_pcnt	N2__1_pcnt	N2__2_pcnt	EGT_1__deg	EGT_2__deg	OILT1__deg	OILT2__deg	FUEP1__psi	FUEP2__psi	batt1__amp	batt2__amp	batt1_volt	batt2_volt
+pipeline {
+    agent any
+
+    environment {
+        PYTHONIOENCODING = "utf-8"
+        PROJECT_DIR = "C:/Users/T8630/Desktop/xplane_predictive_project"
+        VENV_DIR = "${PROJECT_DIR}/venv"
+        PYTHON = "${VENV_DIR}/Scripts/python.exe"
+    }
+
+    stages {
+
+        stage('Setup Virtual Environment') {
+            steps {
+                echo "Creating virtual environment..."
+                bat """
+                if not exist "%VENV_DIR%" (
+                    python -m venv "%VENV_DIR%"
+                )
+                """
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                echo "Installing required Python packages in virtual environment..."
+                bat """
+                "%PYTHON%" -m pip install --upgrade pip
+                "%PYTHON%" -m pip install -r "%PROJECT_DIR%/requirements.txt"
+                """
+            }
+        }
+
+        stage('Validate Models') {
+            steps {
+                echo "Validating model files (XGBoost + LSTM)..."
+                bat """
+                "%PYTHON%" -X utf8 -c "import joblib, tensorflow as tf, os; \
+xgb=r'%PROJECT_DIR%/models/xplane_xgboost.pkl'; \
+lstm=r'%PROJECT_DIR%/models/xplane_lstm.h5'; \
+assert os.path.exists(xgb), 'Missing XGBoost model!'; \
+assert os.path.exists(lstm), 'Missing LSTM model!'; \
+joblib.load(xgb); tf.keras.models.load_model(lstm); \
+print('✅ Models validated successfully.')"
+                """
+            }
+        }
+
+        stage('Launch Streamlit Dashboard') {
+            steps {
+                echo "Launching Streamlit dashboard..."
+                bat """
+                call "%PYTHON%" -m streamlit run "%PROJECT_DIR%/src/live_app.py" --server.port=8501 --server.headless true
+                """
+                echo "✅ Streamlit launched. Visit http://localhost:8501"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Deployment successful! Access your dashboard at http://localhost:8501"
+        }
+        failure {
+            echo "❌ Build failed. Check Jenkins console for logs."
+        }
+    }
+}
