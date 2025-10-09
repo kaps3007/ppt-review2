@@ -1,0 +1,1 @@
+power_1hp	power_2hp	thrst_1lb	thrst_2lb	rpm_1engin	rpm_2engin	N1__1_pcnt	N1__2_pcnt	N2__1_pcnt	N2__2_pcnt	EGT_1__deg	EGT_2__deg	OILT1__deg	OILT2__deg	FUEP1__psi	FUEP2__psi	batt1__amp	batt2__amp	batt1_volt	batt2_volt
